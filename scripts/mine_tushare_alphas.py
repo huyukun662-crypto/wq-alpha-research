@@ -271,6 +271,24 @@ def factor_library(data: dict, groups: dict[str, list[str]]) -> dict[str, dict]:
             "signal": lambda: group_rank(ts_rank(data["grossprofit_margin"], 252), groups),
         }
 
+    # ---- 高频日频化簇（5 分钟线聚合，仅覆盖分钟数据区间）----
+    if "late_vol_share" in data:
+        lib["late_volume_share"] = {
+            "family": "intraday/volume-structure",
+            "decay": 10,
+            "signal": lambda: group_rank(ts_mean(data["late_vol_share"], 20), groups),
+        }
+        lib["intraday_skew"] = {
+            "family": "intraday/skewness",
+            "decay": 10,
+            "signal": lambda: group_rank(-ts_mean(data["intraday_skew"], 20), groups),
+        }
+        lib["open30_reversal"] = {
+            "family": "intraday/open-momentum",
+            "decay": 10,
+            "signal": lambda: rank(-ts_mean(data["open30_ret"], 5)),
+        }
+
     # ---- 资金流簇（大单+特大单净流入占成交额比例）----
     if "net_lg_amount" in data:
         # net_lg_amount 单位万元, amount 单位千元 -> ×10 统一
@@ -446,6 +464,12 @@ def write_report(results: dict[str, dict], corr: pd.DataFrame, portfolio: list[s
 def run_mine(only: str | None, start: str | None, end: str | None) -> None:
     print("loading panel...", flush=True)
     data = load_panel(start, end)
+    try:
+        from tushare_minute import load_minute_features
+
+        data.update(load_minute_features(data["close"].index, data["close"].columns))
+    except Exception as e:
+        print(f"minute features unavailable: {e}", flush=True)
     print(f"panel: {data['close'].shape[0]} days x {data['close'].shape[1]} stocks", flush=True)
     universe = build_universe(data)
     groups = build_groups(data)
