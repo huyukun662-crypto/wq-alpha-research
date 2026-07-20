@@ -9,3 +9,6 @@ __pycache__/
 .env
 .venv/
 venv/
+tushare_token.txt
+data_tushare/
+tushare_mining_results.json

@@ -81,6 +81,22 @@ python scripts/evolve_skill.py                      # 4. 把实证结果回写 S
 - **LOW_SUB_UNIVERSE_SHARPE**:大概率信号隐含市值倾斜——检查是否变相做多了小票(A股尤其常见)。
 - 每轮结束运行 `evolve_skill.py --apply`,把 CHN 实证经验沉淀回本文件第 7 节。
 
-## 7. CHN 实证记录(自动/人工更新)
+## 7. 无 BRAIN 账号时:tushare 本地数据挖掘
+
+没有 BRAIN 凭据也可以先在本地把同一套流程跑起来——数据源换成 tushare,算子与回测口径本地复刻:
+
+```bash
+export TUSHARE_TOKEN=...                               # 或放 tushare_token.txt(已 gitignore)
+python scripts/tushare_data.py --download --start 20230101 --end 20260717
+python scripts/mine_tushare_alphas.py --mine           # 全因子回测 → tushare_mining_report.md
+```
+
+- **算子**:`rank/group_rank/ts_rank/ts_delta/ts_mean/ts_std_dev/ts_corr/ts_min/ts_max/ts_decay_linear` 按 FASTEXPR 语义在宽表上实现。
+- **回测口径**:delay-1、行业中性(stock_basic.industry)、多空各 1 元、TO=sum|Δw|/4、Fitness 公式同 SKILL §5.1;另报 IC/ICIR 和含 13bp 单边成本的净 Sharpe。
+- **Universe**:每日流通市值前 2000(对齐 TOP2000U)、上市>120 交易日、剔 ST。
+- **字段代理**:daily_basic 无报表科目,基本面簇用 EP(1/pe_ttm)、SP(1/ps_ttm)、股息率代理 ROE/现金流;分析师簇本地无数据,跳过。
+- **局限**:未建模涨跌停/停牌不可成交(反转、流动性簇会高估),无 BRAIN 官方 sub-universe / self-correlation 检查。本地结果只做**筛选与排序**,提交 BRAIN 仍走 `mine_chn_alphas.py`。
+
+## 8. CHN 实证记录(自动/人工更新)
 
 > 首轮挖掘后填写:各簇通过率、有效字段清单、CHN 特有失败模式。发布前脱敏(不含 alpha ID/PnL)。

@@ -57,7 +57,9 @@ wq-alpha-research/
 ├── SKILL_CHN.md              # A股 (CHN region) extension playbook
 ├── scripts/
 │   ├── evolve_skill.py
-│   ├── mine_chn_alphas.py    # CHN field snapshot + candidate mining pipeline
+│   ├── mine_chn_alphas.py    # CHN field snapshot + candidate mining pipeline (BRAIN)
+│   ├── tushare_data.py       # tushare A-share data download/cache layer
+│   ├── mine_tushare_alphas.py # local backtest of the CHN factor library on tushare data
 │   └── submit_batch.py
 └── references/
     ├── chn_candidate_alphas.json
