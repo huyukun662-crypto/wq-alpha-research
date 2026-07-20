@@ -1,0 +1,110 @@
+{
+  "description": "CHN (A股) TOP2000U delay=1 候选因子库。expression 中 {field:kw1|kw2} 占位符由 scripts/mine_chn_alphas.py 在运行时按关键词从 CHN 字段快照解析（取 alphaCount 最高者）。settings_override 覆盖 BASE_SETTINGS（默认 INDUSTRY 中性、decay=0、truncation=0.08）。",
+  "candidates": [
+    {
+      "name": "reversal_5d",
+      "family": "technical/reversal",
+      "rationale": "A股散户占比高、T+1 制度下短期反转是最经典异象；5 日价格变化取负，行业内排名。高 decay 控制换手（SKILL 4.2 技术类 decay 10–30）。",
+      "expression": "group_rank(-ts_delta(close, 5), industry)",
+      "settings_override": { "decay": 15 }
+    },
+    {
+      "name": "reversal_open_close_mix",
+      "family": "technical+fundamental mix",
+      "rationale": "SKILL 模板 E 的 CHN 版：日内反转与慢速基本面 50/50 混合，降低换手并提高 Fitness。",
+      "expression": "0.5 * rank(-(close / open - 1)) + 0.5 * rank(ts_rank({field:operating_income|oper_income|operating profit} / {field:equity|total equity|shareholders equity}, 126))",
+      "settings_override": { "decay": 10 }
+    },
+    {
+      "name": "abnormal_turnover",
+      "family": "liquidity/turnover",
+      "rationale": "A股换手率异象：短期换手相对长期换手放大的股票后续跑输（散户过度交易）。做空异常放量、做多缩量。",
+      "expression": "group_rank(-ts_mean(volume, 20) / ts_mean(volume, 120), industry)",
+      "settings_override": { "decay": 10 }
+    },
+    {
+      "name": "amihud_illiquidity",
+      "family": "liquidity",
+      "rationale": "Amihud 非流动性溢价：单位成交额撬动的价格波动越大，流动性越差，要求的收益补偿越高。A股文献中显著。",
+      "expression": "group_rank(ts_mean(abs(returns) / (close * volume), 20), industry)",
+      "settings_override": { "decay": 15 }
+    },
+    {
+      "name": "low_volatility",
+      "family": "risk/low-vol",
+      "rationale": "低波动异象：A股高波动票被散户追捧导致高估，做多低波做空高波。信号慢、天然低换手。",
+      "expression": "group_rank(-ts_std_dev(returns, 60), subindustry)",
+      "settings_override": { "decay": 5, "neutralization": "SUBINDUSTRY" }
+    },
+    {
+      "name": "price_volume_divergence",
+      "family": "technical/price-volume",
+      "rationale": "价量背离：价升量增的一致性上涨在 A股往往透支后续收益，取价量秩相关的负值。",
+      "expression": "rank(-ts_corr(rank(close), rank(volume), 10))",
+      "settings_override": { "decay": 20 }
+    },
+    {
+      "name": "vwap_deviation",
+      "family": "technical/mean-reversion",
+      "rationale": "收盘价对 VWAP 的偏离次日回归；配合较高 decay 平滑换手。",
+      "expression": "rank(-(close / vwap - 1))",
+      "settings_override": { "decay": 12 }
+    },
+    {
+      "name": "roe_trend",
+      "family": "fundamental/profitability",
+      "rationale": "SKILL 模板 A（通过率最高簇）的 CHN 版：ROE 半年趋势，子行业内排名，decay=0。",
+      "expression": "group_rank(ts_rank({field:operating_income|oper_income|operating profit} / {field:equity|total equity|shareholders equity}, 126), subindustry)",
+      "settings_override": { "decay": 0, "neutralization": "SUBINDUSTRY" }
+    },
+    {
+      "name": "earnings_yield",
+      "family": "fundamental/value",
+      "rationale": "盈利收益率（E/P）：A股价值因子长期有效且与反转簇相关性低。",
+      "expression": "group_rank(ts_rank({field:net_income|netincome|net profit} / cap, 126), industry)",
+      "settings_override": { "decay": 4 }
+    },
+    {
+      "name": "asset_turnover_margin",
+      "family": "fundamental/quality",
+      "rationale": "SKILL 模板 F 的 CHN 版：杜邦分解 利润率×资产周转 = 营业利润/资产，衡量经营效率。",
+      "expression": "rank(ts_rank({field:operating_income|oper_income|operating profit} / {field:assets|total assets}, 126))",
+      "settings_override": { "decay": 0 }
+    },
+    {
+      "name": "analyst_eps_yield",
+      "family": "analyst",
+      "rationale": "SKILL 模板 B 的 CHN 版：一致预期 EPS / 收盘价，行业内排名；A股分析师覆盖集中在大票，注意 sub-universe 检查。",
+      "expression": "group_rank(ts_rank({field:est_eps|eps_mean|consensus eps|forecast eps} / close, 126), industry)",
+      "settings_override": { "decay": 4 }
+    },
+    {
+      "name": "cash_flow_yield",
+      "family": "fundamental/cashflow",
+      "rationale": "SKILL 模板 C 的 CHN 版：经营现金流/权益，规避 A股应计利润操纵。",
+      "expression": "group_rank(ts_rank({field:cash_flow_op|operating cash flow|cashflow from operations} / {field:equity|total equity|shareholders equity}, 126), industry)",
+      "settings_override": { "decay": 0 }
+    },
+    {
+      "name": "reversal_volatility_scaled",
+      "family": "technical/reversal",
+      "rationale": "波动率标准化的反转：用 20 日波动缩放 5 日跌幅，减少高波动票主导，缓解 CONCENTRATED_WEIGHT。",
+      "expression": "group_rank(-ts_delta(close, 5) / (ts_std_dev(returns, 20) * close + 0.0001), industry)",
+      "settings_override": { "decay": 15 }
+    },
+    {
+      "name": "quality_value_mix",
+      "family": "mix/quality+value",
+      "rationale": "SKILL 模板 D 思路：盈利趋势 + 盈利收益率 50/50，跨簇混合提高 Fitness、压低换手。",
+      "expression": "0.5 * group_rank(ts_rank({field:operating_income|oper_income|operating profit} / {field:equity|total equity|shareholders equity}, 126), subindustry) + 0.5 * group_rank(ts_rank({field:net_income|netincome|net profit} / cap, 126), industry)",
+      "settings_override": { "decay": 4, "neutralization": "SUBINDUSTRY" }
+    },
+    {
+      "name": "range_position",
+      "family": "technical/position",
+      "rationale": "20 日价格区间位置：贴近区间高点的动量透支，A股短周期内偏反转，取负。",
+      "expression": "rank(-(close - ts_min(low, 20)) / (ts_max(high, 20) - ts_min(low, 20) + 0.0001))",
+      "settings_override": { "decay": 15 }
+    }
+  ]
+}

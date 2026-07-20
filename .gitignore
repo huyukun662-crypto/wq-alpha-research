@@ -1,6 +1,8 @@
 credential.txt
 alpha_db.json
 batch_submit_results.json
+chn_mining_results.json
+chn_mining_report.md
 *.pyc
 __pycache__/
 .DS_Store
