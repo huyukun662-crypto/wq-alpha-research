@@ -52,11 +52,33 @@ def get_pro():
     return ts.pro_api(load_token())
 
 
-def call_with_retry(fn, retries: int = 6, **kwargs) -> pd.DataFrame:
+def call_with_retry(fn, retries: int = 6, call_timeout: int = 90, **kwargs) -> pd.DataFrame:
+    """带重试 + 硬超时。
+
+    tushare SDK 底层 requests 显式传 timeout=None，会覆盖 socket 全局默认超时，
+    网络抖动可让进程永久挂起——因此用线程池 future 强制 90 秒截断。
+    """
+    import signal
+
+    def _on_alarm(signum, frame):
+        raise TimeoutError(f"tushare call exceeded {call_timeout}s")
+
     delay = 5
     for attempt in range(retries):
         try:
-            return fn(**kwargs)
+            old = signal.signal(signal.SIGALRM, _on_alarm)
+            signal.alarm(call_timeout)
+            try:
+                return fn(**kwargs)
+            finally:
+                signal.alarm(0)
+                signal.signal(signal.SIGALRM, old)
+        except TimeoutError as e:
+            if attempt == retries - 1:
+                raise
+            print(f"  {e}, retrying", flush=True)
+            time.sleep(delay)
+            delay = min(delay * 2, 120)
         except Exception as e:  # tushare 限流以普通 Exception 抛出
             if attempt == retries - 1:
                 raise
