@@ -167,48 +167,105 @@ def download(start: str, end: str) -> None:
     print(f"download complete: {len(dates)} dates, {n_calls} new calls", flush=True)
 
 
-def load_panel(start: str | None = None, end: str | None = None) -> dict[str, pd.DataFrame]:
-    """把缓存拼成宽表字典：{字段: DataFrame(index=date, columns=ts_code)}。"""
-    frames: dict[str, list[pd.DataFrame]] = {ep: [] for ep in ENDPOINTS}
-    for ep in ENDPOINTS:
-        for p in sorted((DATA_DIR / ep).glob("*.parquet")):
-            d = p.stem
-            if (start and d < start) or (end and d > end):
-                continue
-            frames[ep].append(pd.read_parquet(p))
-    daily = pd.concat(frames["daily"], ignore_index=True)
-    basic = pd.concat(frames["daily_basic"], ignore_index=True)
-    adj = pd.concat(frames["adj_factor"], ignore_index=True)
-    mf = pd.concat(frames["moneyflow"], ignore_index=True) if frames.get("moneyflow") else None
+PANEL_DIR = DATA_DIR / "panel"
 
-    def pivot(df: pd.DataFrame, col: str) -> pd.DataFrame:
-        out = df.pivot_table(index="trade_date", columns="ts_code", values=col, aggfunc="last")
-        return out.sort_index().astype("float32")
+DAILY_FIELDS = ("open", "high", "low", "close", "pre_close", "pct_chg", "vol", "amount")
+BASIC_FIELDS = (
+    "turnover_rate", "turnover_rate_f", "volume_ratio", "pe_ttm", "pb",
+    "ps_ttm", "dv_ttm", "total_mv", "circ_mv",
+)
+
+
+def _read_endpoint(ep: str, start: str | None, end: str | None, columns=None) -> pd.DataFrame:
+    parts = []
+    for p in sorted((DATA_DIR / ep).glob("*.parquet")):
+        d = p.stem
+        if (start and d < start) or (end and d > end):
+            continue
+        try:
+            df = pd.read_parquet(p, columns=columns)
+        except Exception:
+            df = pd.read_parquet(p)  # 空文件/缺列（接口当日无数据）
+            if df.empty or "ts_code" not in df.columns:
+                continue
+            if columns:
+                df = df[[c for c in columns if c in df.columns]]
+        parts.append(df)
+    return pd.concat(parts, ignore_index=True)
+
+
+def _assemble(df: pd.DataFrame, fields, dates: pd.Index, codes: pd.Index, out: dict) -> None:
+    """长表 -> 宽表：numpy 直接寻址，比 pivot_table 快一个量级。重复 (date,code) 取后值。"""
+    import numpy as np
+
+    r = dates.get_indexer(df["trade_date"].astype(str).to_numpy())
+    c = codes.get_indexer(df["ts_code"].to_numpy())
+    ok = (r >= 0) & (c >= 0)
+    r, c = r[ok], c[ok]
+    for f in fields:
+        v = pd.to_numeric(df[f], errors="coerce").to_numpy(dtype="float32")[ok]
+        arr = np.full((len(dates), len(codes)), np.nan, dtype="float32")
+        arr[r, c] = v
+        out[f] = pd.DataFrame(arr, index=dates, columns=codes)
+
+
+def build_panel_cache(start: str | None = None, end: str | None = None) -> None:
+    """一次性把日频长表装配成宽表并缓存到 data_tushare/panel/。"""
+    import time as _t
+
+    PANEL_DIR.mkdir(exist_ok=True)
+    t0 = _t.time()
+    daily = _read_endpoint("daily", start, end)
+    dates = pd.Index(sorted(daily["trade_date"].astype(str).unique()))
+    codes = pd.Index(sorted(daily["ts_code"].unique()))
+    out: dict[str, pd.DataFrame] = {}
+    _assemble(daily, DAILY_FIELDS, dates, codes, out)
+    del daily
+    print(f"daily assembled {_t.time()-t0:.0f}s", flush=True)
+
+    basic = _read_endpoint("daily_basic", start, end)
+    _assemble(basic, BASIC_FIELDS, dates, codes, out)
+    del basic
+    adj = _read_endpoint("adj_factor", start, end)
+    _assemble(adj, ("adj_factor",), dates, codes, out)
+    del adj
+    mf = _read_endpoint(
+        "moneyflow", start, end,
+        columns=["ts_code", "trade_date", "buy_lg_amount", "sell_lg_amount",
+                 "buy_elg_amount", "sell_elg_amount", "net_mf_amount"],
+    )
+    mf = mf.assign(
+        net_lg_amount=(mf["buy_lg_amount"] + mf["buy_elg_amount"])
+        - (mf["sell_lg_amount"] + mf["sell_elg_amount"])
+    )
+    _assemble(mf, ("net_lg_amount", "net_mf_amount"), dates, codes, out)
+    del mf
+    print(f"all assembled {_t.time()-t0:.0f}s", flush=True)
+
+    for name, wide in out.items():
+        wide.to_parquet(PANEL_DIR / f"{name}.parquet")
+    print(f"panel cache saved: {len(out)} fields, {_t.time()-t0:.0f}s", flush=True)
+
+
+def load_panel(start: str | None = None, end: str | None = None) -> dict[str, pd.DataFrame]:
+    """加载宽表面板（优先用 panel/ 缓存；无缓存则先构建）。"""
+    if not (PANEL_DIR / "close.parquet").exists():
+        build_panel_cache(None, None)
 
     data: dict[str, pd.DataFrame] = {}
-    for col in ("open", "high", "low", "close", "pre_close", "pct_chg", "vol", "amount"):
-        data[col] = pivot(daily, col)
-    for col in (
-        "turnover_rate", "turnover_rate_f", "volume_ratio", "pe_ttm", "pb",
-        "ps_ttm", "dv_ttm", "total_mv", "circ_mv",
-    ):
-        data[col] = pivot(basic, col)
-    data["adj_factor"] = pivot(adj, "adj_factor")
+    for p in sorted(PANEL_DIR.glob("*.parquet")):
+        df = pd.read_parquet(p)
+        if start or end:
+            mask = pd.Series(True, index=df.index)
+            if start:
+                mask &= df.index >= start
+            if end:
+                mask &= df.index <= end
+            df = df[mask]
+        data[p.stem] = df
 
-    if mf is not None:
-        # 大单+特大单净流入（万元）；amount 单位是千元，统一到「万元」口径在因子里处理
-        mf = mf.assign(
-            net_lg_amount=(mf["buy_lg_amount"] + mf["buy_elg_amount"])
-            - (mf["sell_lg_amount"] + mf["sell_elg_amount"])
-        )
-        data["net_lg_amount"] = pivot(mf, "net_lg_amount")
-        data["net_mf_amount"] = pivot(mf, "net_mf_amount")
-
-    # 对齐所有矩阵到同一 index/columns
     idx = data["close"].index
     cols = data["close"].columns
-    for k in list(data):
-        data[k] = data[k].reindex(index=idx, columns=cols)
 
     # 派生字段
     data["returns"] = data["pct_chg"] / 100.0

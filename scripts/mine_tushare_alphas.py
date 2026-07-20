@@ -475,7 +475,8 @@ def run_mine(only: str | None, start: str | None, end: str | None) -> None:
     groups = build_groups(data)
     lib = factor_library(data, groups)
     if only:
-        lib = {k: v for k, v in lib.items() if only.lower() in k.lower()}
+        subs = [s.strip().lower() for s in only.split(",") if s.strip()]
+        lib = {k: v for k, v in lib.items() if any(s in k.lower() for s in subs)}
 
     results: dict[str, dict] = {}
     for i, (name, spec) in enumerate(lib.items()):
@@ -497,19 +498,33 @@ def run_mine(only: str | None, start: str | None, end: str | None) -> None:
             results[name] = {"error": f"{type(e).__name__}: {e}", "family": spec["family"]}
             print(f"    ERROR: {e}", flush=True)
 
-    pnls = pd.DataFrame({n: r["pnl"] for n, r in results.items() if "pnl" in r})
-    corr = pnls.corr()
+    # ---- 增量合并：与之前批次的结果汇成同一份报告（支持分批跑完全部因子）----
+    new_pnls = pd.DataFrame({n: r["pnl"] for n, r in results.items() if "pnl" in r})
+    if FACTOR_RET_PATH.exists():
+        old_pnls = pd.read_parquet(FACTOR_RET_PATH)
+        keep = [c for c in old_pnls.columns if c not in new_pnls.columns]
+        pnls = pd.concat([old_pnls[keep], new_pnls], axis=1) if keep else new_pnls
+    else:
+        pnls = new_pnls
     pnls.to_parquet(FACTOR_RET_PATH)
-    portfolio = low_corr_portfolio(results, corr)
 
+    merged: dict[str, dict] = {}
+    if RESULTS_PATH.exists():
+        merged = json.loads(RESULTS_PATH.read_text(encoding="utf-8"))
+    for n, r in results.items():
+        merged[n] = {k: v for k, v in r.items() if k != "pnl"}
+    RESULTS_PATH.write_text(json.dumps(merged, ensure_ascii=False, indent=2, default=float), encoding="utf-8")
+
+    # 报告用合并后的全集；pnl 从合并 parquet 回填（组合净值计算用）
+    report_results: dict[str, dict] = {n: dict(r) for n, r in merged.items()}
+    for n in report_results:
+        if n in pnls.columns:
+            report_results[n]["pnl"] = pnls[n].dropna()
+
+    corr = pnls.corr()
+    portfolio = low_corr_portfolio(report_results, corr)
     period = f"{pnls.index.min()}..{pnls.index.max()}"
-    write_report(results, corr, portfolio, period)
-
-    dump = {
-        n: {k: v for k, v in r.items() if k != "pnl"}
-        for n, r in results.items()
-    }
-    RESULTS_PATH.write_text(json.dumps(dump, ensure_ascii=False, indent=2, default=float), encoding="utf-8")
+    write_report(report_results, corr, portfolio, period)
     print(f"\nreport -> {REPORT_PATH.name}; factor returns -> {FACTOR_RET_PATH}", flush=True)
     print(f"low-corr portfolio: {portfolio}", flush=True)
 
