@@ -233,6 +233,53 @@ def factor_library(data: dict, groups: dict[str, list[str]]) -> dict[str, dict]:
             "signal": lambda: group_rank(-data["volume_ratio"], groups),
         },
     }
+
+    # ---- 财务指标簇（point-in-time，按公告日生效；SKILL 模板 A/C/D 的真字段版）----
+    if "roe" in data:
+        roe = data["roe"]
+        lib["roe_trend"] = {
+            "family": "fundamental/profitability",
+            "decay": 4,
+            "signal": lambda: group_rank(ts_rank(roe, 252), groups),
+        }
+        lib["roe_level"] = {
+            "family": "fundamental/quality",
+            "decay": 4,
+            "signal": lambda: group_rank(roe, groups),
+        }
+        lib["quality_value_roe_mix"] = {
+            "family": "mix/quality+value",
+            "decay": 4,
+            "signal": lambda: 0.5 * group_rank(ts_rank(roe, 252), groups) + 0.5 * group_rank(ep, groups),
+        }
+    if "ocfps" in data:
+        lib["ocf_yield"] = {
+            "family": "fundamental/cashflow",
+            "decay": 4,
+            "signal": lambda: group_rank(data["ocfps"] / data["close"], groups),
+        }
+    if "netprofit_yoy" in data:
+        lib["netprofit_growth"] = {
+            "family": "fundamental/growth",
+            "decay": 4,
+            "signal": lambda: group_rank(data["netprofit_yoy"], groups),
+        }
+    if "grossprofit_margin" in data:
+        lib["gross_margin_trend"] = {
+            "family": "fundamental/quality",
+            "decay": 4,
+            "signal": lambda: group_rank(ts_rank(data["grossprofit_margin"], 252), groups),
+        }
+
+    # ---- 资金流簇（大单+特大单净流入占成交额比例）----
+    if "net_lg_amount" in data:
+        # net_lg_amount 单位万元, amount 单位千元 -> ×10 统一
+        lg_ratio = data["net_lg_amount"] * 10.0 / (data["amount"] + 1.0)
+        lib["smart_money_flow"] = {
+            "family": "moneyflow",
+            "decay": 10,
+            "signal": lambda: group_rank(ts_mean(lg_ratio, 20), groups),
+        }
     return lib
 
 

@@ -27,7 +27,10 @@ SKILL_DIR = SCRIPT_DIR.parent
 DATA_DIR = SKILL_DIR / "data_tushare"
 TOKEN_PATH = SKILL_DIR / "tushare_token.txt"
 
-ENDPOINTS = ("daily", "daily_basic", "adj_factor")
+ENDPOINTS = ("daily", "daily_basic", "adj_factor", "moneyflow")
+
+# 季频接口：按报告期批量拉取（fina_indicator_vip 等），带 ann_date 供 point-in-time 对齐
+QUARTERLY_ENDPOINTS = ("fina_indicator_vip", "forecast_vip", "express_vip")
 
 
 def load_token() -> str:
@@ -66,6 +69,35 @@ def trade_dates(pro, start: str, end: str) -> list[str]:
     return sorted(cal["cal_date"].tolist())
 
 
+def quarter_periods(start: str, end: str) -> list[str]:
+    """报告期列表（0331/0630/0930/1231），起点提前一年保证 ffill 有基期。"""
+    y0, y1 = int(start[:4]) - 1, int(end[:4])
+    out = []
+    for y in range(y0, y1 + 1):
+        for q in ("0331", "0630", "0930", "1231"):
+            p = f"{y}{q}"
+            if p <= end:
+                out.append(p)
+    return out
+
+
+def download_quarterly(pro, start: str, end: str) -> None:
+    for ep in QUARTERLY_ENDPOINTS:
+        (DATA_DIR / ep).mkdir(parents=True, exist_ok=True)
+    periods = quarter_periods(start, end)
+    for ep in QUARTERLY_ENDPOINTS:
+        fn = getattr(pro, ep)
+        for p in periods:
+            path = DATA_DIR / ep / f"{p}.parquet"
+            # 最近 2 个报告期可能仍在披露中，每次重新拉取
+            if path.exists() and p < periods[-2]:
+                continue
+            df = call_with_retry(fn, period=p)
+            df.to_parquet(path)
+            time.sleep(0.4)
+        print(f"quarterly {ep}: {len(periods)} periods done", flush=True)
+
+
 def download(start: str, end: str) -> None:
     pro = get_pro()
     for ep in ENDPOINTS:
@@ -87,6 +119,8 @@ def download(start: str, end: str) -> None:
         sb = pd.concat(parts, ignore_index=True).drop_duplicates("ts_code")
         sb.to_parquet(sb_path)
         print(f"stock_basic: {len(sb)} rows (incl. delisted)", flush=True)
+
+    download_quarterly(pro, start, end)
 
     dates = trade_dates(pro, start, end)
     print(f"trade dates: {len(dates)} ({dates[0]}..{dates[-1]})", flush=True)
@@ -119,6 +153,7 @@ def load_panel(start: str | None = None, end: str | None = None) -> dict[str, pd
     daily = pd.concat(frames["daily"], ignore_index=True)
     basic = pd.concat(frames["daily_basic"], ignore_index=True)
     adj = pd.concat(frames["adj_factor"], ignore_index=True)
+    mf = pd.concat(frames["moneyflow"], ignore_index=True) if frames.get("moneyflow") else None
 
     def pivot(df: pd.DataFrame, col: str) -> pd.DataFrame:
         out = df.pivot_table(index="trade_date", columns="ts_code", values=col, aggfunc="last")
@@ -133,6 +168,15 @@ def load_panel(start: str | None = None, end: str | None = None) -> dict[str, pd
     ):
         data[col] = pivot(basic, col)
     data["adj_factor"] = pivot(adj, "adj_factor")
+
+    if mf is not None:
+        # 大单+特大单净流入（万元）；amount 单位是千元，统一到「万元」口径在因子里处理
+        mf = mf.assign(
+            net_lg_amount=(mf["buy_lg_amount"] + mf["buy_elg_amount"])
+            - (mf["sell_lg_amount"] + mf["sell_elg_amount"])
+        )
+        data["net_lg_amount"] = pivot(mf, "net_lg_amount")
+        data["net_mf_amount"] = pivot(mf, "net_mf_amount")
 
     # 对齐所有矩阵到同一 index/columns
     idx = data["close"].index
@@ -151,7 +195,46 @@ def load_panel(start: str | None = None, end: str | None = None) -> dict[str, pd
 
     sb = pd.read_parquet(DATA_DIR / "stock_basic.parquet")
     data["_stock_basic"] = sb
+
+    for col, wide in build_fundamental_panel(idx, cols).items():
+        data[col] = wide
     return data
+
+
+FINA_FIELDS = ("roe", "ocfps", "netprofit_yoy", "or_yoy", "grossprofit_margin", "debt_to_assets")
+
+
+def build_fundamental_panel(trade_index, columns) -> dict[str, pd.DataFrame]:
+    """季频财务指标 -> point-in-time 日频宽表。
+
+    对齐规则（杜绝未来函数）：每条记录在 **公告日(ann_date) 之后的第一个交易日**
+    生效，向前 ffill 直到下一次公告。同一公告日多条记录取报告期(end_date)最新。
+    """
+    fina_dir = DATA_DIR / "fina_indicator_vip"
+    files = sorted(fina_dir.glob("*.parquet")) if fina_dir.exists() else []
+    if not files:
+        return {}
+    fina = pd.concat([pd.read_parquet(p) for p in files], ignore_index=True)
+    fina = fina.dropna(subset=["ann_date"]).sort_values(["ts_code", "ann_date", "end_date"])
+    fina = fina.drop_duplicates(["ts_code", "ann_date"], keep="last")
+
+    dates = pd.Index(trade_index)
+    out: dict[str, pd.DataFrame] = {}
+    for f in FINA_FIELDS:
+        if f not in fina.columns:
+            continue
+        wide = fina.pivot_table(index="ann_date", columns="ts_code", values=f, aggfunc="last")
+        # 公告日(可能非交易日) -> 之后第一个交易日
+        pos = dates.searchsorted(wide.index, side="left")
+        # 公告日恰为交易日时，当日盘后披露，次日生效
+        is_trade_day = pos < len(dates)
+        eff_pos = pos + (is_trade_day & (dates[pos.clip(max=len(dates) - 1)] == wide.index)).astype(int)
+        keep = eff_pos < len(dates)
+        wide = wide[keep]
+        wide.index = dates[eff_pos[keep]]
+        wide = wide.groupby(level=0).last()
+        out[f] = wide.reindex(index=dates, columns=columns).ffill().astype("float32")
+    return out
 
 
 def main() -> int:
