@@ -73,11 +73,20 @@ def download(start: str, end: str) -> None:
 
     sb_path = DATA_DIR / "stock_basic.parquet"
     if not sb_path.exists():
-        sb = call_with_retry(
-            pro.stock_basic, fields="ts_code,name,industry,market,list_date,exchange"
-        )
+        # 含已退市/暂停上市，避免行业映射的幸存者偏差
+        parts = []
+        for status in ("L", "D", "P"):
+            parts.append(
+                call_with_retry(
+                    pro.stock_basic,
+                    list_status=status,
+                    fields="ts_code,name,industry,market,list_date,exchange",
+                )
+            )
+            time.sleep(0.3)
+        sb = pd.concat(parts, ignore_index=True).drop_duplicates("ts_code")
         sb.to_parquet(sb_path)
-        print(f"stock_basic: {len(sb)} rows", flush=True)
+        print(f"stock_basic: {len(sb)} rows (incl. delisted)", flush=True)
 
     dates = trade_dates(pro, start, end)
     print(f"trade dates: {len(dates)} ({dates[0]}..{dates[-1]})", flush=True)
