@@ -16,11 +16,15 @@ from __future__ import annotations
 
 import argparse
 import os
+import socket
 import sys
 import time
 from pathlib import Path
 
 import pandas as pd
+
+# tushare SDK 的 HTTP 调用不带超时，网络抖动会导致进程永久挂起
+socket.setdefaulttimeout(60)
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 SKILL_DIR = SCRIPT_DIR.parent
