@@ -84,38 +84,70 @@ def download(freq: str, start: str, end: str) -> None:
     print(f"minute download complete: {done}/{len(codes)}", flush=True)
 
 
+def _aggregate_one(df: pd.DataFrame) -> pd.DataFrame:
+    """单股 5min -> 日频特征（全向量化）。"""
+    t = pd.to_datetime(df["trade_time"])
+    df = df.assign(day=t.dt.strftime("%Y%m%d"), hm=t.dt.strftime("%H:%M")).sort_values("trade_time")
+
+    g = df.groupby("day")
+    # 日内 bar 收益（跨日断开）
+    ret = df["close"].pct_change()
+    ret[g.cumcount() == 0] = np.nan
+    df = df.assign(ret=ret)
+    gg = df.groupby("day")
+
+    n_bars = gg["close"].count()
+    total_amt = gg["amount"].sum()
+    late_amt = df["amount"].where(df["hm"] >= "14:35", 0.0).groupby(df["day"]).sum()
+    skew = gg["ret"].skew()
+    vol = gg["ret"].std()
+
+    m30 = df[df["hm"] <= "10:00"]
+    o30 = m30.groupby("day").agg(first_open=("open", "first"), last_close=("close", "last"))
+    open30 = o30["last_close"] / (o30["first_open"] + 1e-12) - 1.0
+
+    out = pd.DataFrame(
+        {
+            "late_vol_share": late_amt / total_amt.replace(0, np.nan),
+            "intraday_skew": skew,
+            "open30_ret": open30,
+            "intraday_vol": vol,
+        }
+    )
+    out = out[(n_bars >= 20) & total_amt.gt(0)]
+    out.index.name = "trade_date"
+    return out.reset_index()
+
+
 def aggregate() -> None:
-    """5min -> 每股每日日内特征（长表落盘）。"""
+    """5min -> 每股每日日内特征（长表落盘，按股票断点续传）。"""
     src = DATA_DIR / "min5"
     files = sorted(src.glob("*.parquet"))
-    print(f"aggregating {len(files)} stocks", flush=True)
-    rows = []
-    for i, p in enumerate(files):
+    done_codes: set[str] = set()
+    parts: list[pd.DataFrame] = []
+    if FEATURES_PATH.exists():
+        prev = pd.read_parquet(FEATURES_PATH)
+        done_codes = set(prev["ts_code"].unique())
+        parts.append(prev)
+    todo = [p for p in files if p.stem not in done_codes]
+    print(f"aggregating {len(todo)}/{len(files)} stocks (resume: {len(done_codes)} done)", flush=True)
+
+    buf: list[pd.DataFrame] = []
+    for i, p in enumerate(todo):
         df = pd.read_parquet(p)
-        if df.empty:
-            continue
-        t = pd.to_datetime(df["trade_time"])
-        df = df.assign(day=t.dt.strftime("%Y%m%d"), hm=t.dt.strftime("%H:%M"))
-        df = df.sort_values("trade_time")
-        code = df["ts_code"].iloc[0]
-        for day, g in df.groupby("day", sort=True):
-            if len(g) < 20:
-                continue
-            ret = g["close"].to_numpy()
-            ret = np.diff(ret) / (ret[:-1] + 1e-12)
-            amt = g["amount"].to_numpy()
-            total_amt = amt.sum()
-            if total_amt <= 0:
-                continue
-            late = amt[g["hm"].to_numpy() >= "14:35"].sum() / total_amt
-            m, s = ret.mean(), ret.std()
-            skew = float(((ret - m) ** 3).mean() / (s**3 + 1e-12))
-            open30 = g[g["hm"] <= "10:00"]
-            o30 = float(open30["close"].iloc[-1] / (open30["open"].iloc[0] + 1e-12) - 1) if len(open30) else np.nan
-            rows.append((day, code, late, skew, o30, float(s)))
-        if (i + 1) % 500 == 0:
-            print(f"  {i+1}/{len(files)}", flush=True)
-    out = pd.DataFrame(rows, columns=["trade_date", "ts_code", "late_vol_share", "intraday_skew", "open30_ret", "intraday_vol"])
+        if not df.empty:
+            feat = _aggregate_one(df)
+            feat.insert(1, "ts_code", p.stem)
+            buf.append(feat)
+        if (i + 1) % 200 == 0:
+            print(f"  {i+1}/{len(todo)}", flush=True)
+        if (i + 1) % 1000 == 0:  # 周期性落盘，进程被杀不丢进度
+            parts.append(pd.concat(buf, ignore_index=True))
+            buf = []
+            pd.concat(parts, ignore_index=True).to_parquet(FEATURES_PATH)
+    if buf:
+        parts.append(pd.concat(buf, ignore_index=True))
+    out = pd.concat(parts, ignore_index=True)
     out.to_parquet(FEATURES_PATH)
     print(f"saved {len(out)} stock-days -> {FEATURES_PATH.name}", flush=True)
 
