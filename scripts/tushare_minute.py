@@ -33,7 +33,22 @@ sys.path.insert(0, str(SCRIPT_DIR))
 from tushare_data import DATA_DIR, call_with_retry, get_pro  # noqa: E402
 
 FREQ_DIR = {"1min": "min1", "5min": "min5", "15min": "min15", "60min": "min60"}
-FEATURES_PATH = DATA_DIR / "min5_features.parquet"
+FEATURES_PATH = DATA_DIR / "min5_features.parquet"  # 首窗(20240701-20260717)遗留命名
+
+# 历史回溯按窗口分目录，断点续传粒度 = 股票 × 窗口
+LEGACY_WINDOW = ("5min", "20240701", "20260717")
+
+
+def window_dir(freq: str, start: str, end: str) -> Path:
+    if (freq, start, end) == LEGACY_WINDOW:
+        return DATA_DIR / "min5"
+    return DATA_DIR / f"{FREQ_DIR[freq]}_{start}_{end}"
+
+
+def features_path_for(dir_path: Path) -> Path:
+    if dir_path.name == "min5":
+        return FEATURES_PATH
+    return DATA_DIR / f"min5_features_{dir_path.name}.parquet"
 
 
 def chunk_ranges(start: str, end: str, days: int = 140) -> list[tuple[str, str]]:
@@ -51,7 +66,7 @@ def chunk_ranges(start: str, end: str, days: int = 140) -> list[tuple[str, str]]
 
 def download(freq: str, start: str, end: str) -> None:
     pro = get_pro()
-    out_dir = DATA_DIR / FREQ_DIR[freq]
+    out_dir = window_dir(freq, start, end)
     out_dir.mkdir(parents=True, exist_ok=True)
 
     sb = pd.read_parquet(DATA_DIR / "stock_basic.parquet")
@@ -119,18 +134,18 @@ def _aggregate_one(df: pd.DataFrame) -> pd.DataFrame:
     return out.reset_index()
 
 
-def aggregate() -> None:
-    """5min -> 每股每日日内特征（长表落盘，按股票断点续传）。"""
-    src = DATA_DIR / "min5"
+def aggregate_dir(src: Path) -> None:
+    """单个窗口目录：5min -> 每股每日日内特征（长表落盘，按股票断点续传）。"""
+    feat_path = features_path_for(src)
     files = sorted(src.glob("*.parquet"))
     done_codes: set[str] = set()
     parts: list[pd.DataFrame] = []
-    if FEATURES_PATH.exists():
-        prev = pd.read_parquet(FEATURES_PATH)
+    if feat_path.exists():
+        prev = pd.read_parquet(feat_path)
         done_codes = set(prev["ts_code"].unique())
         parts.append(prev)
     todo = [p for p in files if p.stem not in done_codes]
-    print(f"aggregating {len(todo)}/{len(files)} stocks (resume: {len(done_codes)} done)", flush=True)
+    print(f"[{src.name}] aggregating {len(todo)}/{len(files)} stocks (resume: {len(done_codes)} done)", flush=True)
 
     buf: list[pd.DataFrame] = []
     for i, p in enumerate(todo):
@@ -144,19 +159,30 @@ def aggregate() -> None:
         if (i + 1) % 1000 == 0:  # 周期性落盘，进程被杀不丢进度
             parts.append(pd.concat(buf, ignore_index=True))
             buf = []
-            pd.concat(parts, ignore_index=True).to_parquet(FEATURES_PATH)
+            pd.concat(parts, ignore_index=True).to_parquet(feat_path)
     if buf:
         parts.append(pd.concat(buf, ignore_index=True))
+    if not parts:
+        return
     out = pd.concat(parts, ignore_index=True)
-    out.to_parquet(FEATURES_PATH)
-    print(f"saved {len(out)} stock-days -> {FEATURES_PATH.name}", flush=True)
+    out.to_parquet(feat_path)
+    print(f"saved {len(out)} stock-days -> {feat_path.name}", flush=True)
+
+
+def aggregate() -> None:
+    """聚合所有 5min 窗口目录。"""
+    dirs = [DATA_DIR / "min5"] + sorted(DATA_DIR.glob("min5_2*"))
+    for src in dirs:
+        if src.is_dir():
+            aggregate_dir(src)
 
 
 def load_minute_features(trade_index, columns) -> dict[str, pd.DataFrame]:
-    """给 mine_tushare_alphas.load 用：日内特征宽表（无数据则空 dict）。"""
-    if not FEATURES_PATH.exists():
+    """给 mine_tushare_alphas.load 用：日内特征宽表（合并所有窗口；无数据则空 dict）。"""
+    paths = [p for p in [FEATURES_PATH, *sorted(DATA_DIR.glob("min5_features_*.parquet"))] if p.exists()]
+    if not paths:
         return {}
-    df = pd.read_parquet(FEATURES_PATH)
+    df = pd.concat([pd.read_parquet(p) for p in paths], ignore_index=True)
     out = {}
     for f in ("late_vol_share", "intraday_skew", "open30_ret", "intraday_vol"):
         wide = df.pivot_table(index="trade_date", columns="ts_code", values=f, aggfunc="last")
