@@ -156,7 +156,7 @@ def aggregate_dir(src: Path) -> None:
             buf.append(feat)
         if (i + 1) % 200 == 0:
             print(f"  {i+1}/{len(todo)}", flush=True)
-        if (i + 1) % 1000 == 0:  # 周期性落盘，进程被杀不丢进度
+        if (i + 1) % 1000 == 0 and buf:  # 周期性落盘，进程被杀不丢进度
             parts.append(pd.concat(buf, ignore_index=True))
             buf = []
             pd.concat(parts, ignore_index=True).to_parquet(feat_path)
