@@ -398,11 +398,21 @@ def factor_library(data: dict, groups: dict[str, list[str]]) -> dict[str, dict]:
                 ts_mean(data["limit_fd_amount"] / (data["circ_mv"] * 1e4 + 1.0), 20), groups
             ),
         }
-        lib["limit_open_times"] = {
+        lib["limit_seal_quality"] = {
             "family": "sentiment/limit",
             "decay": 10,
-            # 炸板次数多 = 承接弱
-            "signal": lambda: group_rank(-ts_mean(data["limit_open_times"], 20), groups),
+            # 炸板次数多 = 承接弱。必须**条件化**在"确实上过涨停板"的样本上:
+            # 直接对 fillna(0) 的 open_times 做截面 rank,等于把没上过板的股票
+            # 全部并列在 0,因子会退化成 limit_up_frequency 的复制品
+            # (三者 Sharpe 1.59/1.62/1.69、回撤同为 57.6%)。
+            # 这里除以同窗口涨停次数 -> 每次涨停的平均炸板数,无涨停则为 NaN。
+            "signal": lambda: group_rank(
+                -(
+                    ts_mean(data["limit_open_times"], 20)
+                    / ts_mean(data["limit_up"], 20).where(ts_mean(data["limit_up"], 20) > 0)
+                ),
+                groups,
+            ),
         }
 
     # ---- Sentiment 类：龙虎榜（top_list / top_inst）----
