@@ -298,6 +298,274 @@ def factor_library(data: dict, groups: dict[str, list[str]]) -> dict[str, dict]:
             "decay": 10,
             "signal": lambda: group_rank(ts_mean(lg_ratio, 20), groups),
         }
+
+    # =======================================================================
+    # BRAIN 九大类别扩展簇（tushare_extra.py 下载 + tushare_brain_panel.py 装配）
+    # =======================================================================
+
+    # ---- Model 类：筹码分布（cyq_perf）----
+    if "winner_rate" in data:
+        wr = data["winner_rate"]
+        lib["chip_winner_rate"] = {
+            "family": "chip/winner-rate",
+            "decay": 10,
+            # 获利盘高 -> 抛压大，做空高获利盘
+            "signal": lambda: group_rank(-wr, groups),
+        }
+        lib["chip_winner_rate_change"] = {
+            "family": "chip/winner-rate",
+            "decay": 10,
+            "signal": lambda: group_rank(-ts_delta(wr, 20), groups),
+        }
+        lib["chip_concentration"] = {
+            "family": "chip/concentration",
+            "decay": 15,
+            # 筹码越集中（分位差越小）越易拉升
+            "signal": lambda: group_rank(-data["chip_concentration"], groups),
+        }
+        lib["price_vs_avg_cost"] = {
+            "family": "chip/cost-deviation",
+            "decay": 12,
+            # 股价相对平均成本的偏离 -> 均值回复
+            "signal": lambda: group_rank(
+                -(close / (data["weight_avg"] * data["adj_factor"] + EPS) - 1.0), groups
+            ),
+        }
+
+    # ---- Sentiment 类：两融余额（margin_detail）----
+    if "rzye" in data:
+        # rzye 单位元, circ_mv 单位万元 -> ×1e4 统一
+        margin_ratio = data["rzye"] / (data["circ_mv"] * 1e4 + 1.0)
+        lib["margin_balance_ratio"] = {
+            "family": "sentiment/margin",
+            "decay": 10,
+            # 融资盘占比高 = 杠杆拥挤，反向
+            "signal": lambda: group_rank(-margin_ratio, groups),
+        }
+        lib["margin_balance_change"] = {
+            "family": "sentiment/margin",
+            "decay": 10,
+            "signal": lambda: group_rank(
+                ts_delta(margin_ratio, 20) / (ts_std_dev(margin_ratio, 60) + EPS), groups
+            ),
+        }
+        lib["margin_buy_intensity"] = {
+            "family": "sentiment/margin",
+            "decay": 10,
+            # 当日融资买入额占成交额比 (rzmre 元, amount 千元)
+            "signal": lambda: group_rank(
+                -ts_mean(data["rzmre"] / (data["amount"] * 1e3 + 1.0), 20), groups
+            ),
+        }
+
+    # ---- Sentiment 类：北向持股（hk_hold）----
+    if "hk_ratio" in data:
+        hk = data["hk_ratio"].fillna(0.0)
+        lib["northbound_holding"] = {
+            "family": "sentiment/northbound",
+            "decay": 10,
+            "signal": lambda: group_rank(hk, groups),
+        }
+        lib["northbound_change"] = {
+            "family": "sentiment/northbound",
+            "decay": 10,
+            # 北向增持速度（标准化）
+            "signal": lambda: group_rank(
+                ts_delta(hk, 20) / (ts_std_dev(hk, 60) + EPS), groups
+            ),
+        }
+
+    # ---- Sentiment 类：涨跌停（limit_list_d）----
+    if "limit_up" in data:
+        lib["limit_up_frequency"] = {
+            "family": "sentiment/limit",
+            "decay": 10,
+            # 近期涨停次数多 = 情绪透支，反向
+            "signal": lambda: group_rank(-ts_mean(data["limit_up"], 20), groups),
+        }
+        lib["limit_up_net"] = {
+            "family": "sentiment/limit",
+            "decay": 10,
+            "signal": lambda: group_rank(
+                -(ts_mean(data["limit_up"], 20) - ts_mean(data["limit_down"], 20)), groups
+            ),
+        }
+        lib["limit_seal_strength"] = {
+            "family": "sentiment/limit",
+            "decay": 10,
+            # 封单额/流通市值：封板强度（limit_fd_amount 元, circ_mv 万元）
+            "signal": lambda: group_rank(
+                ts_mean(data["limit_fd_amount"] / (data["circ_mv"] * 1e4 + 1.0), 20), groups
+            ),
+        }
+        lib["limit_open_times"] = {
+            "family": "sentiment/limit",
+            "decay": 10,
+            # 炸板次数多 = 承接弱
+            "signal": lambda: group_rank(-ts_mean(data["limit_open_times"], 20), groups),
+        }
+
+    # ---- Sentiment 类：龙虎榜（top_list / top_inst）----
+    if "lhb_net_amount" in data:
+        lib["lhb_net_flow"] = {
+            "family": "sentiment/dragon-tiger",
+            "decay": 10,
+            # net_amount 单位万元, circ_mv 万元
+            "signal": lambda: group_rank(
+                ts_mean(data["lhb_net_amount"] / (data["circ_mv"] + 1.0), 20), groups
+            ),
+        }
+    if "inst_net_buy" in data:
+        lib["lhb_inst_net_buy"] = {
+            "family": "sentiment/dragon-tiger",
+            "decay": 10,
+            "signal": lambda: group_rank(
+                ts_mean(data["inst_net_buy"] / (data["circ_mv"] * 1e4 + 1.0), 20), groups
+            ),
+        }
+
+    # ---- Analyst 类：卖方盈利预测（report_rc）----
+    if "rc_eps" in data:
+        rc_eps = data["rc_eps"]
+        lib["analyst_eps_revision"] = {
+            "family": "analyst/revision",
+            "decay": 6,
+            # 一致预期 EPS 上修 -> 正向
+            "signal": lambda: group_rank(
+                ts_delta(rc_eps, 60) / (rc_eps.abs() + EPS), groups
+            ),
+        }
+        lib["analyst_coverage"] = {
+            "family": "analyst/attention",
+            "decay": 6,
+            # 覆盖研报数：关注度过高 = 已被定价，反向
+            "signal": lambda: group_rank(-ts_mean(data["rc_count"].fillna(0.0), 60), groups),
+        }
+        lib["analyst_target_upside"] = {
+            "family": "analyst/target-price",
+            "decay": 6,
+            "signal": lambda: group_rank(data["rc_tp_mid"] / (data["close"] + EPS) - 1.0, groups),
+        }
+        lib["analyst_forward_ep"] = {
+            "family": "analyst/value",
+            "decay": 6,
+            # 预期盈利收益率 = 预测EPS / 价格
+            "signal": lambda: group_rank(rc_eps / (data["close"] + EPS), groups),
+        }
+
+    # ---- Social Media 代理：机构调研（stk_surv）----
+    if "surv_count" in data:
+        lib["institution_survey"] = {
+            "family": "attention/survey",
+            "decay": 10,
+            "signal": lambda: group_rank(ts_mean(data["surv_count"], 60), groups),
+        }
+
+    # ---- Earnings 类：分红（dividend）----
+    if "div_cash" in data:
+        lib["cash_dividend_yield"] = {
+            "family": "earnings/dividend",
+            "decay": 6,
+            # 近一年现金分红 / 价格（div_cash 元/股）
+            "signal": lambda: group_rank(
+                ts_mean(data["div_cash"].fillna(0.0), 252) * 252 / (data["close"] + EPS), groups
+            ),
+        }
+
+    # ---- News 类：公告数量（anns_d，磁盘允许时才有）----
+    if "anns_count" in data:
+        lib["announcement_intensity"] = {
+            "family": "news/announcement",
+            "decay": 10,
+            # 公告密集 = 信息不确定性上升，反向
+            "signal": lambda: group_rank(-ts_mean(data["anns_count"].fillna(0.0), 20), groups),
+        }
+
+    # ---- Model 类：技术指标库（stk_factor_pro）----
+    if "rsi_hfq_6" in data:
+        lib["rsi_reversal"] = {
+            "family": "technical/rsi",
+            "decay": 10,
+            "signal": lambda: group_rank(-data["rsi_hfq_6"], groups),
+        }
+        lib["rsi_divergence"] = {
+            "family": "technical/rsi",
+            "decay": 10,
+            # 短期 RSI 相对长期的背离
+            "signal": lambda: group_rank(-(data["rsi_hfq_6"] - data["rsi_hfq_24"]), groups),
+        }
+        lib["macd_momentum"] = {
+            "family": "technical/macd",
+            "decay": 10,
+            "signal": lambda: group_rank(data["macd_hfq"] / (close + EPS), groups),
+        }
+        lib["kdj_reversal"] = {
+            "family": "technical/kdj",
+            "decay": 10,
+            "signal": lambda: group_rank(-data["kdj_k_hfq"], groups),
+        }
+        lib["cci_reversal"] = {
+            "family": "technical/cci",
+            "decay": 10,
+            "signal": lambda: group_rank(-data["cci_hfq"], groups),
+        }
+        lib["bias_reversal"] = {
+            "family": "technical/bias",
+            "decay": 10,
+            "signal": lambda: group_rank(-data["bias2_hfq"], groups),
+        }
+        lib["mfi_reversal"] = {
+            "family": "technical/mfi",
+            "decay": 10,
+            "signal": lambda: group_rank(-data["mfi_hfq"], groups),
+        }
+        lib["adx_trend_strength"] = {
+            "family": "technical/dmi",
+            "decay": 10,
+            "signal": lambda: group_rank(-data["dmi_adx_hfq"], groups),
+        }
+        lib["boll_position"] = {
+            "family": "technical/bollinger",
+            "decay": 10,
+            # 布林带内位置，越靠上轨越回落
+            "signal": lambda: group_rank(
+                -(close - data["boll_lower_hfq"])
+                / (data["boll_upper_hfq"] - data["boll_lower_hfq"] + EPS),
+                groups,
+            ),
+        }
+        lib["vr_volume_ratio"] = {
+            "family": "technical/vr",
+            "decay": 10,
+            "signal": lambda: group_rank(-data["vr_hfq"], groups),
+        }
+        lib["ma_trend_alignment"] = {
+            "family": "technical/moving-average",
+            "decay": 10,
+            "signal": lambda: group_rank(data["ma_hfq_20"] / (data["ma_hfq_60"] + EPS) - 1.0, groups),
+        }
+        lib["atr_normalized"] = {
+            "family": "risk/atr",
+            "decay": 10,
+            "signal": lambda: group_rank(-data["atr_hfq"] / (close + EPS), groups),
+        }
+
+    # ---- 跨类别混合簇 ----
+    if "winner_rate" in data and "hk_ratio" in data:
+        lib["chip_northbound_mix"] = {
+            "family": "mix/chip+northbound",
+            "decay": 10,
+            "signal": lambda: 0.5 * group_rank(-data["winner_rate"], groups)
+            + 0.5 * group_rank(data["hk_ratio"].fillna(0.0), groups),
+        }
+    if "rc_eps" in data and "roe" in data:
+        lib["analyst_quality_mix"] = {
+            "family": "mix/analyst+quality",
+            "decay": 6,
+            "signal": lambda: 0.5
+            * group_rank(ts_delta(data["rc_eps"], 60) / (data["rc_eps"].abs() + EPS), groups)
+            + 0.5 * group_rank(data["roe"], groups),
+        }
     return lib
 
 
@@ -470,6 +738,14 @@ def run_mine(only: str | None, start: str | None, end: str | None) -> None:
         data.update(load_minute_features(data["close"].index, data["close"].columns))
     except Exception as e:
         print(f"minute features unavailable: {e}", flush=True)
+    try:
+        from tushare_brain_panel import load_extra_panel
+
+        extra = load_extra_panel(data["close"].index, data["close"].columns)
+        data.update(extra)
+        print(f"BRAIN extra panel: {len(extra)} fields", flush=True)
+    except Exception as e:
+        print(f"extra panel unavailable: {e}", flush=True)
     print(f"panel: {data['close'].shape[0]} days x {data['close'].shape[1]} stocks", flush=True)
     universe = build_universe(data)
     groups = build_groups(data)

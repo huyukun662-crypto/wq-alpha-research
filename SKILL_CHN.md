@@ -165,3 +165,56 @@ python scripts/mine_tushare_alphas.py --mine           # 全因子回测 → tus
 15. **幸存主题全是重平滑的基本面**(毛利率、B/P):与第一轮"基本面簇最稳"互相印证;GA 自己进化出了 `ts_decay_linear` 双层平滑结构,等价于超低换手(TO 1-5%)。
 16. **警惕退化表达式的"数据可得性泄漏"**:`div(vol,vol)`、`sign(volume_ratio)` 这类常数表达式经过 decay(其 NaN 按 0 处理)后,实际变成了"过去 120 日停牌/缺数据越少分越高"的因子——IS(2015-18 停牌潮)Sharpe 高达 1.65,OOS 全灭。文法生成器应过滤常数表达式,decay 实现的 NaN 语义要在挖掘前想清楚。
 17. **种子因子 OOS 普遍衰减 50-70% 但方向不翻**(ep 1.02→0.35、amihud 1.09→0.41):A股因子密度在下降,历史净 Sharpe 打对折是更现实的实盘预期。
+
+### 2026-07-25 第五轮:BRAIN 九大类别数据落地 + 35 个新因子(2015-07 至 2026-07,2803 个交易日)
+
+把 BRAIN 的九大数据类别映射到 tushare 接口全量落地(`tushare_extra.py`,按接口+日期断点续传),
+装配成日频宽表面板(`tushare_brain_panel.py`,51 个字段),接入因子库新增 35 个因子:
+
+| BRAIN 类别 | tushare 接口 | 落地量 | 新因子簇 |
+|-----------|-------------|--------|---------|
+| Fundamental | income/balancesheet/cashflow_vip | 50 期 / 242MB | (已有财务簇) |
+| Model | cyq_perf 筹码分布 | 2803 天 / 269MB | chip_*(获利盘、集中度、成本偏离) |
+| Model | stk_factor_pro 技术指标库 | 2803 天 / 4.6GB | rsi/macd/kdj/cci/bias/mfi/adx/boll/vr/atr |
+| Sentiment | margin_detail 两融 | 2803 天 / 352MB | margin_*(余额占比、变化、买入强度) |
+| Sentiment | hk_hold 北向 | 2803 天 / 98MB | northbound_*(持股比例、增持速度) |
+| Sentiment | limit_list_d 涨跌停 | 2803 天 / 42MB | limit_*(涨停频率、净涨停、封单、炸板) |
+| Sentiment | top_list/top_inst 龙虎榜 | 2803 天 / 135MB | lhb_*(净买入、机构席位) |
+| Analyst | report_rc 卖方预测 | 2803 天 / 147MB | analyst_*(EPS 修正、覆盖度、目标价空间) |
+| Social Media(代理) | stk_surv 机构调研 | 2803 天 / 20MB | institution_survey |
+| Earnings | dividend 分红 | 2803 天 / 24MB | cash_dividend_yield |
+| Option | opt_daily ETF/指数期权 | 2803 天 / 614MB | 仅市场级,未做横截面因子 |
+| News | anns_d 个股公告 | **未下载(磁盘不足)** | announcement_intensity(代码已就位) |
+
+**新因子里进入总榜前列的**:
+
+| 因子 | Sharpe | Fitness | 年化 | 回撤 | 说明 |
+|------|--------|---------|------|------|------|
+| limit_open_times | 1.69 | 2.09 | 19.2% | 57.6% | 涨停炸板反转 |
+| limit_up_frequency | 1.62 | 1.98 | 18.9% | 57.6% | 涨停频率反转 |
+| analyst_eps_revision | 1.50 | 0.99 | 5.4% | **6.5%** | 一致预期 EPS 上修 |
+| bias_reversal | 1.03 | 0.95 | 10.5% | 18.1% | BIAS 乖离率反转 |
+| vr_volume_ratio | 1.07 | 0.82 | 7.4% | 21.2% | VR 成交量比率反转 |
+
+经验:
+
+18. **A股没有个股期权**:Option 类只有 ETF/指数期权(50ETF/300ETF/500ETF + 沪深300指数期权),
+    只能做市场级波动率/PCR 情绪信号,**做不了横截面因子**——这是数据本身的限制,不是权限问题。
+    Social Media 类同样无真正对应,用机构调研(stk_surv)做关注度代理。
+19. **事件日口径的对齐是隐蔽的未来函数来源**:研报(report_date)、公告(ann_date)、调研(surv_date)
+    都不是交易日口径。用 `get_indexer` 精确匹配会把周末/节假日发生的事件**整条丢掉**;
+    正确做法是 `searchsorted(side="right")` 落到**严格晚于事件日的第一个交易日**。
+    第一版就踩了这个坑,report_rc 覆盖率因此只有 2.7%。
+20. **事件数据要区分「状态量」和「流量」**:一致预期 EPS 是状态(两份研报之间应保持上一份的值,
+    需 ffill,但要设有效期 TTL=180 交易日让过期预期失效),调研次数/分红是流量(稀疏即真实,不能 ffill,
+    因子侧用 ts_mean 做窗口聚合)。把状态量当流量处理会让 `ts_delta` 全是 NaN——修复后覆盖率 2.7%→43.5%。
+21. **稀疏事件因子会「假性同质」**:limit_up_frequency / limit_up_net / limit_open_times 三个因子
+    Sharpe 1.59/1.62/1.69、回撤全部 57.6%——因为绝大多数股票该字段恒为 0,
+    group_rank 后大量并列,三者实质都退化成「做空近期上过涨停板的股票」。
+    **稀疏 0/1 型字段做截面 rank 前要先确认非零覆盖率**,否则会把一个信号数成三个。
+22. **趋势类技术指标在 A股全样本为负**(macd_momentum -0.87、ma_trend_alignment -0.98、adx -0.47),
+    反转类全为正(bias 1.03、vr 1.07、rsi 0.83、cci 0.75):与前四轮"A股反转主导"完全一致。
+    不要事后翻方向当新因子——那是同一个 beta 的镜像。
+23. **筹码/两融/北向三个"聪明钱"簇集体失效**(Sharpe 均在 ±0.4 以内):
+    winner_rate、融资余额占比、北向持股比例的截面信息大多已被价格与市值吸收;
+    北向持股比例覆盖率仅 26%(只有标的股),截面可比性差。
