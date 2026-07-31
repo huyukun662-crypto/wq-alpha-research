@@ -113,6 +113,11 @@ def build_panel(start: str = "20190101", end: str = "20260301") -> pd.DataFrame:
 
     cb = cb.sort_values(["b_sym", "date"]).reset_index(drop=True)
 
+    # 未上市/停牌占位行 close=0(vol 也为 0)。这些行本就在 universe 之外,
+    # 但留着会让 fwd_ret 出现 inf,任何漏掉二次掩码的下游脚本都会被污染。
+    for col in ("b_close", "b_pre_close", "s_close", "s_close_adj"):
+        cb.loc[cb[col] == 0, col] = np.nan
+
     # ---- 衍生字段 ----
     # 转股比例 = 100 / 转股价;由转股价值反推,天然含下修与派息调整,无需 cb_price_chg
     cb["conv_ratio"] = cb["conv_value"] / cb["s_close"].replace(0, np.nan)

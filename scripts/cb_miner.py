@@ -159,6 +159,32 @@ def f_turn_cool(df, window: int = 20):
     return -_rank(df, _roll(df, df["b_turnover"], window))
 
 
+# ---- 批次 5:信用质量控制 ----
+# 假设:双低/纯债溢价率天然做多低价券,而低价券在 2024H2 信用恐慌中被无差别抛售,
+# 这是 OOS 衰减的主因。用正股市值/股价作为信用质量代理去中和这一暴露。
+@factor("cb_credit_q",
+        "信用质量:正股市值越大、股价离面值退市线越远,违约与退市风险越低",
+        "0.5*rank(log(s_total_mv)) + 0.5*rank(s_close)", roll=5)
+def f_credit_q(df, w_mv: float = 0.5):
+    mv = _rank(df, np.log(df["s_total_mv"].clip(lower=1.0)))
+    px = _rank(df, df["s_close"])
+    return w_mv * mv + (1 - w_mv) * px
+
+
+@factor("cb_value_credit",
+        "双溢价率估值 + 信用质量控制",
+        "(1-w)*cb_dual_prem + w*cb_credit_q", roll=3)
+def f_value_credit(df, w_credit: float = 0.3, w_floor: float = 0.5):
+    return (1 - w_credit) * f_dual_prem(df, w_floor=w_floor) + w_credit * f_credit_q(df)
+
+
+@factor("cb_dbl_low_credit",
+        "双低 + 信用质量控制",
+        "(1-w)*cb_dbl_low + w*cb_credit_q", roll=3)
+def f_dbl_low_credit(df, w_credit: float = 0.3):
+    return (1 - w_credit) * f_dbl_low(df) + w_credit * f_credit_q(df)
+
+
 # ---------------------------------------------------------------------------
 # 评估
 # ---------------------------------------------------------------------------
