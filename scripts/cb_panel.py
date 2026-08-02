@@ -67,6 +67,43 @@ def _load_stock_daily(dates: list[str]) -> pd.DataFrame:
     return st.drop(columns=["adj_factor"])
 
 
+def _pit_conversion(dates: np.ndarray) -> pd.DataFrame:
+    """从 cb_share 装出 PIT 的剩余余额与累计转股比例。
+
+    cb_basic.remain_size 是当前时点快照,merge 到时间序列上等价于泄漏
+    「该券未来是否退市」(零值 99.9% 对应最终退市),必须改用本函数。
+
+    对齐用 searchsorted(side="right") 落到严格晚于 publish_date 的第一个交易日:
+    精确匹配会把周末/节假日公告整条丢掉,当日生效则是未来函数。
+    """
+    share_dir = CB_DIR / "cb_share"
+    files = sorted(share_dir.glob("*.parquet"))
+    if not files:
+        raise FileNotFoundError("先跑 python scripts/cb_data.py --share")
+
+    frames = []
+    for f in files:
+        df = pd.read_parquet(f)
+        if len(df):
+            frames.append(df)
+    sh = pd.concat(frames, ignore_index=True)
+    sh = sh.rename(columns={"ts_code": "b_sym"})
+    sh["publish_date"] = pd.to_datetime(sh["publish_date"], errors="coerce")
+    sh = sh.dropna(subset=["publish_date"]).sort_values(["b_sym", "publish_date"])
+
+    idx = np.searchsorted(dates, sh["publish_date"].to_numpy(), side="right")
+    ok = idx < len(dates)
+    sh = sh[ok].copy()
+    sh["eff_date"] = dates[idx[ok]]
+
+    sh = sh.drop_duplicates(subset=["b_sym", "eff_date"], keep="last")
+    keep = ["b_sym", "eff_date", "remain_size", "acc_convert_ratio", "convert_price"]
+    return sh[[c for c in keep if c in sh.columns]].rename(
+        columns={"remain_size": "remain_size_pit",
+                 "acc_convert_ratio": "acc_conv_ratio_pit",
+                 "convert_price": "conv_price_pit"})
+
+
 def build_panel(start: str = "20190101", end: str = "20260301") -> pd.DataFrame:
     cb = _load_cb_daily(start, end)
     cb = cb.rename(columns={
@@ -111,6 +148,22 @@ def build_panel(start: str = "20190101", end: str = "20260301") -> pd.DataFrame:
         if col in cb.columns:
             cb[col] = pd.to_datetime(cb[col], errors="coerce")
 
+    # PIT 转股进度。cb_basic.remain_size 有未来函数,不可用于任何因子。
+    trade_days = np.array(sorted(cb["date"].unique()))
+    pit = _pit_conversion(trade_days)
+    cb = cb.merge(pit, left_on=["b_sym", "date"], right_on=["b_sym", "eff_date"], how="left")
+    cb = cb.drop(columns=["eff_date"], errors="ignore")
+    cb = cb.sort_values(["b_sym", "date"])
+    for col in ("remain_size_pit", "acc_conv_ratio_pit", "conv_price_pit"):
+        if col in cb.columns:
+            cb[col] = cb.groupby("b_sym", sort=False)[col].ffill()
+    # 首个转股公告之前:尚未转股,存量即发行额
+    cb["remain_size_pit"] = cb["remain_size_pit"].fillna(cb["issue_size"])
+    cb["acc_conv_ratio_pit"] = cb["acc_conv_ratio_pit"].fillna(0.0)
+
+    # 快照字段改名,防止误用
+    cb = cb.rename(columns={"remain_size": "remain_size_SNAPSHOT_DO_NOT_USE"})
+
     cb = cb.sort_values(["b_sym", "date"]).reset_index(drop=True)
 
     # 未上市/停牌占位行 close=0(vol 也为 0)。这些行本就在 universe 之外,
@@ -140,7 +193,8 @@ def build_panel(start: str = "20190101", end: str = "20260301") -> pd.DataFrame:
     cb["s_log_ret"] = np.log(cb["s_close_adj"] / g["s_close_adj"].shift(1))
     cb["stock_volatility"] = g["s_log_ret"].transform(lambda x: x.rolling(30, min_periods=15).std())
     cb["bond_volatility"] = g["b_log_ret"].transform(lambda x: x.rolling(30, min_periods=15).std())
-    cb["b_turnover"] = cb["b_amount"] / (cb["remain_size"].replace(0, np.nan) * 1000.0)
+    cb["adv_yuan"] = cb["b_amount"] * 1000.0                      # tushare amount 单位千元
+    cb["b_turnover"] = cb["adv_yuan"] / cb["remain_size_pit"].replace(0, np.nan)
     cb["days_listed"] = (cb["date"] - cb["list_date"]).dt.days
 
     # 前视收益:T 日信号吃 T->T+1 的转债收益

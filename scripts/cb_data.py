@@ -54,6 +54,13 @@ CB_PRICE_CHG_FIELDS = (
     "ts_code,bond_short_name,publish_date,change_date,convert_price_initial,"
     "convertprice_bef,convertprice_aft"
 )
+# 转股进度。带 publish_date,是唯一能给出「逐期真实剩余余额」的接口。
+# cb_basic.remain_size 是当前时点快照,merge 到时间序列上会构成未来函数
+# (零值率 2019 年 99.1% -> 2026 年 21.3%,几乎等价于「该券最终会退市」)。
+CB_SHARE_FIELDS = (
+    "ts_code,publish_date,end_date,convert_price,convert_val,convert_vol,"
+    "acc_convert_val,acc_convert_vol,acc_convert_ratio,remain_size,total_shares"
+)
 
 
 def download_basic(pro) -> None:
@@ -95,6 +102,29 @@ def download_basic(pro) -> None:
         print(f"cb_price_chg: {len(chg)} 行")
 
 
+def download_share(pro) -> None:
+    """逐券拉转股进度。按券分片落盘,断点续传。"""
+    out_dir = CB_DIR / "cb_share"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    basic = pd.read_parquet(CB_DIR / "cb_basic.parquet")
+    codes = basic["ts_code"].tolist()
+    todo = [c for c in codes if not (out_dir / f"{c}.parquet").exists()]
+    print(f"cb_share: {len(codes)} 只,待下载 {len(todo)}")
+    t0 = time.time()
+    for i, code in enumerate(todo):
+        try:
+            df = call_with_retry(pro.cb_share, ts_code=code, fields=CB_SHARE_FIELDS)
+        except Exception as exc:  # noqa: BLE001
+            print(f"  {code} 失败: {str(exc)[:60]}")
+            continue
+        df.to_parquet(out_dir / f"{code}.parquet", index=False)
+        if (i + 1) % 200 == 0:
+            rate = (i + 1) / (time.time() - t0)
+            print(f"  {i + 1}/{len(todo)} {rate:.1f}/s eta={(len(todo)-i-1)/max(rate,1e-6)/60:.1f}min")
+        time.sleep(0.08)
+    print(f"cb_share 完成,{len(list(out_dir.glob('*.parquet')))} 只")
+
+
 def download_daily(pro, start: str, end: str) -> None:
     CB_DAILY_DIR.mkdir(parents=True, exist_ok=True)
     dates = trade_dates(pro, start, end)
@@ -125,6 +155,7 @@ def status() -> None:
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--basic", action="store_true")
+    ap.add_argument("--share", action="store_true")
     ap.add_argument("--daily", action="store_true")
     ap.add_argument("--status", action="store_true")
     ap.add_argument("--start", default="20190101")
@@ -138,6 +169,8 @@ def main() -> None:
     pro = get_pro()
     if args.basic:
         download_basic(pro)
+    if args.share:
+        download_share(pro)
     if args.daily:
         download_daily(pro, args.start, args.end)
 
