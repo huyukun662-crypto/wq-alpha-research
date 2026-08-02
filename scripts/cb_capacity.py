@@ -57,7 +57,7 @@ def cost_bp(trade_notional: np.ndarray, adv: np.ndarray, sigma: np.ndarray) -> n
 def simulate(dates, w_wide: np.ndarray, ret_wide: np.ndarray, adv_wide: np.ndarray,
              out_wide: np.ndarray, sig_wide: np.ndarray, aum: float,
              adv_days_cap: float = 5.0, own_cap: float = 0.10,
-             use_caps: bool = True) -> dict:
+             use_caps: bool = True, max_participation: float | None = 0.10) -> dict:
     """逐日跑一遍受容量约束的组合,返回毛/净口径指标。
 
     w_wide     T×N 目标权重(Σ|w|=1)
@@ -65,10 +65,15 @@ def simulate(dates, w_wide: np.ndarray, ret_wide: np.ndarray, adv_wide: np.ndarr
     adv_wide   T×N 日成交额(元)
     out_wide   T×N 剩余余额(元,PIT)
     sig_wide   T×N 个券波动率(日频,小数)
+
+    max_participation 是每日单券成交额占其 ADV 的上限。设为 None 即假设整笔调仓
+    当天成交完——那会把少数落在薄流动性券上的大单的冲击成本算爆(实测交易额加权
+    单位成本 75bp,其中冲击 51.6bp,p99 参与率 154%),不是真实执行的样子。
+    限速后持仓会滞后于目标,tracking 字段报出这个偏离。
     """
     T, N = w_wide.shape
-    w_prev = np.zeros(N)
-    gross_pnl, net_pnl, cost_ser, part_p95, cap_hit = [], [], [], [], []
+    hold = np.zeros(N)
+    gross_pnl, net_pnl, cost_ser, part_p95, cap_hit, track = [], [], [], [], [], []
 
     for t in range(T):
         w = np.nan_to_num(w_wide[t])
@@ -79,20 +84,29 @@ def simulate(dates, w_wide: np.ndarray, ret_wide: np.ndarray, adv_wide: np.ndarr
         w_t = apply_caps(w, adv, outq, aum, adv_days_cap, own_cap) if use_caps else w
         cap_hit.append(float(np.nansum(np.abs(w_t - w)) / 2.0))
 
-        dv = np.abs(w_t - w_prev) * aum
+        # 出池的券必须清干净,不能被参与率上限拖着不放
+        exited = (~np.isfinite(w_wide[t])) & (hold != 0)
+        delta = w_t - hold
+        if max_participation is not None:
+            allow = max_participation * adv / aum
+            allow = np.where(exited, np.abs(delta), allow)   # 强制离场不受限速
+            delta = np.sign(delta) * np.minimum(np.abs(delta), allow)
+        hold = hold + delta
+
+        dv = np.abs(delta) * aum
         c_bp = cost_bp(dv, adv, sg)
         cost = float(np.nansum(dv * c_bp / 1e4) / aum)
 
         r = np.nan_to_num(ret_wide[t])
-        g = float(np.nansum(w_t * r))
+        g = float(np.nansum(hold * r))
         gross_pnl.append(g)
         net_pnl.append(g - cost)
         cost_ser.append(cost)
+        track.append(float(np.nansum(np.abs(hold - w_t)) / 2.0))
 
         with np.errstate(divide="ignore", invalid="ignore"):
             pr = np.where(adv > 0, dv / adv, np.nan)
         part_p95.append(float(np.nanpercentile(pr[dv > 0], 95)) if (dv > 0).any() else np.nan)
-        w_prev = w_t
 
     g = np.array(gross_pnl)
     n = np.array(net_pnl)
@@ -106,4 +120,5 @@ def simulate(dates, w_wide: np.ndarray, ret_wide: np.ndarray, adv_wide: np.ndarr
         "cost_ret": float(c.mean() * TRADING_DAYS),
         "part_p95": float(np.nanmean(part_p95)),
         "cap_hit": float(np.mean(cap_hit)),
+        "tracking": float(np.mean(track)),
     }

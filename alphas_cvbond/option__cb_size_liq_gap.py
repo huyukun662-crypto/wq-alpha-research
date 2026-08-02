@@ -1,3 +1,15 @@
+"""已作废 —— 请勿使用。
+
+本因子含 cb_basic.remain_size,该字段是调用 API 当天的快照,被 merge 到整条
+时间序列后等价于泄漏「该券未来是否退市」:零值样本中 99.9% 最终退市,零值率
+按年从 2019 的 99.1% 单调降到 2026 的 21.3%。限制在至今仍在市的券上重测,
+该腿 IS IC 从 +0.0075 变为 -0.0019,ICIR 从 1.82 变为 -0.17——样本内的边际
+全部来自未来信息。
+
+PIT 替代口径见 scripts/cb_panel.py 的 _pit_conversion(基于 cb_share)。
+干净数据下的真实水平与容量结论见 alphas_cvbond/README.md。
+"""
+
 import os
 import getpass
 import pandas as pd

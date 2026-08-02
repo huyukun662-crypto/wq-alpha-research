@@ -48,11 +48,14 @@ def cs_neutralize(s: pd.Series, by: pd.Series, exposures: pd.DataFrame) -> pd.Se
     用途是把「流动性押注」从 alpha 里剥掉——否则组合会在不知情的情况下
     整体做多小盘低流动性券,这正是回测好看、实盘做不了的典型来源。
     """
+    # 解释变量先做截面 rank 标准化。直接用原始值(转债价格可达 400+、ADV 跨三个
+    # 数量级)会让逐日 OLS 的 beta 被离群点带着抖,残差换手比原信号高一个量级,
+    # 那是实现噪声而非真实的暴露剥离。
     df = pd.DataFrame({"y": s.values}, index=s.index)
-    for c in exposures.columns:
-        df[c] = exposures[c].values
-    df["_by"] = by.values
     cols = list(exposures.columns)
+    for c in cols:
+        df[c] = cs_rank(exposures[c], by).values
+    df["_by"] = by.values
 
     def _resid(g):
         m = g["y"].notna() & g[cols].notna().all(axis=1)
