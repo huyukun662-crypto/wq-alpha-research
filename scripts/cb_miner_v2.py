@@ -68,7 +68,11 @@ def cs_neutralize(s: pd.Series, by: pd.Series, exposures: pd.DataFrame) -> pd.Se
         out.loc[m] = y - X @ beta
         return out
 
-    return df.groupby("_by", group_keys=False).apply(_resid, include_groups=False)
+    # groupby.apply 的拼接顺序按组键排序,与输入行序不一致。不显式 reindex 就把
+    # 结果交给下游按日期分组的算子,会让信号与日期错位——表现为「换手暴涨到 0.4、
+    # IC 归零」,看起来像因子被中性化打穿,其实只是对错了行。
+    out = df.groupby("_by", group_keys=False).apply(_resid, include_groups=False)
+    return out.reindex(s.index)
 
 
 def roll_by(s: pd.Series, key: pd.Series, window: int, how: str = "mean") -> pd.Series:
