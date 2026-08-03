@@ -1,9 +1,17 @@
 credential.txt
 alpha_db.json
 batch_submit_results.json
+chn_mining_results.json
+chn_mining_report.md
 *.pyc
 __pycache__/
 .DS_Store
 .env
 .venv/
 venv/
+tushare_token.txt
+data_tushare/
+tushare_mining_results.json
+pipeline.log
+ga_state.json
+ga_cache.json

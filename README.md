@@ -54,13 +54,28 @@ Recommended loop:
 ```text
 wq-alpha-research/
 ├── SKILL.md
+├── SKILL_CHN.md              # A股 (CHN region) extension playbook
 ├── scripts/
 │   ├── evolve_skill.py
+│   ├── mine_chn_alphas.py    # CHN field snapshot + candidate mining pipeline (BRAIN)
+│   ├── tushare_data.py       # tushare A-share data download/cache layer
+│   ├── mine_tushare_alphas.py # local backtest of the CHN factor library on tushare data
 │   └── submit_batch.py
 └── references/
+    ├── chn_candidate_alphas.json
     ├── wq_usa_top3000_delay1_data_fields.csv
     ├── wq_usa_top3000_delay1_data_fields.json
     └── wq_usa_top3000_delay1_data_fields_summary.json
+```
+
+### A股 (CHN) Mining
+
+The bundled field snapshot covers USA TOP3000 only. For China A-shares, `SKILL_CHN.md` adapts the playbook to region `CHN` / universe `TOP2000U`, and `scripts/mine_chn_alphas.py` runs the full loop: pull the CHN field snapshot, resolve a 15-candidate factor library (`references/chn_candidate_alphas.json`) against real CHN field ids, simulate, read IS checks from the API, and report. Start with:
+
+```bash
+python scripts/mine_chn_alphas.py --plan          # offline preview, no credentials needed
+python scripts/mine_chn_alphas.py --fetch-fields  # one-time CHN field snapshot
+python scripts/mine_chn_alphas.py --mine          # simulate all candidates -> chn_mining_report.md
 ```
 
 ## What It Helps With
