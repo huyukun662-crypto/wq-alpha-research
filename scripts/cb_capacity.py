@@ -57,7 +57,8 @@ def cost_bp(trade_notional: np.ndarray, adv: np.ndarray, sigma: np.ndarray) -> n
 def simulate(dates, w_wide: np.ndarray, ret_wide: np.ndarray, adv_wide: np.ndarray,
              out_wide: np.ndarray, sig_wide: np.ndarray, aum: float,
              adv_days_cap: float = 5.0, own_cap: float = 0.10,
-             use_caps: bool = True, max_participation: float | None = 0.10) -> dict:
+             use_caps: bool = True, max_participation: float | None = 0.10,
+             no_trade_band: float = 0.0) -> dict:
     """逐日跑一遍受容量约束的组合,返回毛/净口径指标。
 
     w_wide     T×N 目标权重(Σ|w|=1)
@@ -70,6 +71,8 @@ def simulate(dates, w_wide: np.ndarray, ret_wide: np.ndarray, adv_wide: np.ndarr
     当天成交完——那会把少数落在薄流动性券上的大单的冲击成本算爆(实测交易额加权
     单位成本 75bp,其中冲击 51.6bp,p99 参与率 154%),不是真实执行的样子。
     限速后持仓会滞后于目标,tracking 字段报出这个偏离。
+
+    no_trade_band 以「平均持仓权重」的倍数计。0.5 即偏离不足半个平均仓位就不动。
     """
     T, N = w_wide.shape
     hold = np.zeros(N)
@@ -84,9 +87,16 @@ def simulate(dates, w_wide: np.ndarray, ret_wide: np.ndarray, adv_wide: np.ndarr
         w_t = apply_caps(w, adv, outq, aum, adv_days_cap, own_cap) if use_caps else w
         cap_hit.append(float(np.nansum(np.abs(w_t - w)) / 2.0))
 
-        # 出池的券必须清干净,不能被参与率上限拖着不放
+        # 出池的券必须清干净,不能被参与率上限或无交易带拖着不放
         exited = (~np.isfinite(w_wide[t])) & (hold != 0)
         delta = w_t - hold
+
+        # 无交易带:偏离小于阈值就不动。日频重排名会让权重持续微调,
+        # 这些微调贡献的 alpha 远小于其成本,是 43 倍年化换手的主要来源。
+        if no_trade_band and no_trade_band > 0:
+            thresh = no_trade_band * np.nanmean(np.abs(w_t[w_t != 0])) if np.any(w_t != 0) else 0.0
+            delta = np.where((np.abs(delta) < thresh) & ~exited, 0.0, delta)
+
         if max_participation is not None:
             allow = max_participation * adv / aum
             allow = np.where(exited, np.abs(delta), allow)   # 强制离场不受限速
